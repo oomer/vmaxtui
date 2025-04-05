@@ -207,10 +207,6 @@ The 't' field in the snapshot's 's.id' dictionary indicates the type of snapshot
 #include <sys/wait.h> // For waitpid
 #endif
 
-//#include <efsw/FileSystem.hpp> // For file watching
-//#include <efsw/System.hpp> // For file watching
-//#include <efsw/efsw.hpp> // For file watching
-
 dl::bella_sdk::Node essentialsToScene(dl::bella_sdk::Scene& belScene);
 dl::bella_sdk::Node addModelToScene(dl::bella_sdk::Scene& belScene, dl::bella_sdk::Node& belWorld, const VmaxModel& vmaxModel, const std::vector<VmaxRGBA>& vmaxPalette, const std::array<VmaxMaterial, 8>& vmaxMaterial); 
 
@@ -231,7 +227,7 @@ std::mutex unfileQueueMutex;  // Add mutex for thread safety
 std::mutex processQueueMutex;  // Add mutex for thread safety
 
 //Forward declares
-void convertVmaxToBella( const dl::String& vmaxDirName);
+dl::bella_sdk::Scene convertVmaxToBella( const dl::String& vmaxDirName);
 
 // Signal handler for ctrl-c
 void sigend( int ) {
@@ -244,7 +240,6 @@ void sigend( int ) {
 	std::this_thread::sleep_for(std::chrono::milliseconds(100));
 	exit(0);  // Force exit after cleanup
 }
-
 
 static int s_logCtx = 0;
 static void log(void* /*ctx*/, dl::LogType type, const char* msg)
@@ -274,6 +269,7 @@ static void log(void* /*ctx*/, dl::LogType type, const char* msg)
  * - Track rendering progress
  * - Handle error conditions
  * - Store and retrieve the current progress state
+ * - Can be passed by reference unlike Engine
  */
  struct MyEngineObserver : public dl::bella_sdk::EngineObserver
  {
@@ -342,8 +338,6 @@ static void log(void* /*ctx*/, dl::LogType type, const char* msg)
      }
  };
 
-
-
 int DL_main(dl::Args& args) {
     args.add("i", "input", "", "vmax directory or vmax.zip file");
     args.add("o", "output", "", "set output bella file name");
@@ -370,229 +364,20 @@ int DL_main(dl::Args& args) {
         std::cout << initializeThirdPartyLicences() << std::endl;
         return 0;
     }
-
     if (args.have("--input"))
     {
         dl::String bszName;
-        dl::String vmaxDirName;
-        vmaxDirName = args.value("--input");
+        dl::String vmaxDirName = args.value("--input");
+        auto vmaxPath = dl::Path();
+        if (!vmaxPath.exists(vmaxDirName)) {
+            std::cout << "Cannot find directory " << vmaxDirName.buf() << std::endl;
+            return 0;
+        }
+
         bszName = vmaxDirName.replace("vmax", "bsz");
-
-        // Create a new scene
-        dl::bella_sdk::Scene belScene;
-        belScene.loadDefs();
-        auto belWorld = belScene.world(true);
-
-        // scene.json is the toplevel file that hierarchically defines the scene
-        // it contains nestable groups (containers) and objects (instances) that point to resources that define the object
-        // objects properties
-        //  - transformation matrix
-        // objects resources
-        /// - reference a contentsN.vmaxb (lzfse compressed plist file) that contains a 256x256x256 voxel "model"
-        //  - reference to a paletteN.png that defines the 256 24bit colors used in the 256x256x256 model
-        //  - reference to a paletteN.settings.vmaxpsb (plist file) that defines the 8 materials used in the "model"
-        // In scenegraph parlance a group is a xform, a object is a transform with a child geometry 
-        // multiple objects can point to the same model creating what is known as an instance
-        JsonVmaxSceneParser vmaxSceneParser;
-        vmaxSceneParser.parseScene((vmaxDirName+"/scene.json").buf());
-
-        #ifdef _DEBUG
-            vmaxSceneParser.printSummary();
-        #endif
-        std::map<std::string, JsonGroupInfo> jsonGroups = vmaxSceneParser.getGroups();
-        std::map<dl::String, dl::bella_sdk::Node> belGroupNodes; // Map of UUID to bella node
-        std::map<dl::String, dl::bella_sdk::Node> belCanonicalNodes; // Map of UUID to bella node
-
-        // First pass to create all the Bella nodes for the groups
-        for (const auto& [groupName, groupInfo] : jsonGroups) { 
-            dl::String belGroupUUID = dl::String(groupName.c_str());
-            belGroupUUID = belGroupUUID.replace("-", "_"); // Make sure the group name is valid for a Bella node name
-            belGroupUUID = "_" + belGroupUUID; // Make sure the group name is valid for a Bella node name
-            belGroupNodes[belGroupUUID] = belScene.createNode("xform", belGroupUUID, belGroupUUID); // Create a Bella node for the group
-
-
-            VmaxMatrix4x4 objectMat4 = combineVmaxTransforms(groupInfo.rotation[0], 
-                                              groupInfo.rotation[1], 
-                                              groupInfo.rotation[2], 
-                                              groupInfo.rotation[3],
-                                              groupInfo.position[0], 
-                                              groupInfo.position[1], 
-                                              groupInfo.position[2], 
-                                              groupInfo.scale[0], 
-                                              groupInfo.scale[1], 
-                                              groupInfo.scale[2]);
-
-            belGroupNodes[belGroupUUID]["steps"][0]["xform"] = dl::Mat4({
-                objectMat4.m[0][0], objectMat4.m[0][1], objectMat4.m[0][2], objectMat4.m[0][3],
-                objectMat4.m[1][0], objectMat4.m[1][1], objectMat4.m[1][2], objectMat4.m[1][3],
-                objectMat4.m[2][0], objectMat4.m[2][1], objectMat4.m[2][2], objectMat4.m[2][3],
-                objectMat4.m[3][0], objectMat4.m[3][1], objectMat4.m[3][2], objectMat4.m[3][3]
-                });
-        }
-
-        // json file is allowed the parent to be defined after the child, requiring us to create all the bella nodes before we can parent them
-        for (const auto& [groupName, groupInfo] : jsonGroups) { 
-            dl::String belGroupUUID = dl::String(groupName.c_str());
-            belGroupUUID = belGroupUUID.replace("-", "_");
-            belGroupUUID = "_" + belGroupUUID;
-            if (groupInfo.parentId == "") {
-                belGroupNodes[belGroupUUID].parentTo(belWorld); // Group without a parent is a child of the world
-            } else {
-                dl::String belPPPGroupUUID = dl::String(groupInfo.parentId.c_str());
-                belPPPGroupUUID = belPPPGroupUUID.replace("-", "_");
-                belPPPGroupUUID = "_" + belPPPGroupUUID;
-                dl::bella_sdk::Node myParentGroup = belGroupNodes[belPPPGroupUUID]; // Get bella obj
-                belGroupNodes[belGroupUUID].parentTo(myParentGroup); // Group underneath a group
-            }
-        }
-
-        // Efficiently process unique models by examining only the first instance of each model type.
-        // Example: If we have 100 instances of 3 different models:
-        //   "model1.vmaxb": [instance1, instance2, ..., instance50],
-        //   "model2.vmaxb": [instance1, ..., instance30],
-        //   "model3.vmaxb": [instance1, ..., instance20]
-        // This loop runs only 3 times (once per unique model), not 100 times (once per instance)
-        
-        auto modelVmaxbMap = vmaxSceneParser.getModelContentVMaxbMap(); 
-        std::vector<VmaxModel> allModels;
-        std::vector<std::vector<VmaxRGBA>> vmaxPalettes; // one palette per model
-        std::vector<std::array<VmaxMaterial, 8>> vmaxMaterials; // one material per model
-        //std::vector<std::array<VmaxMaterial, 8>> allMaterials; // one material per model
-        //std::vector<std::vector<VmaxRGBA>> allPalettes;
-
-        essentialsToScene(belScene); // create the basic scene elements in Bella
-        
-        // Loop over each model defined in scene.json and process the first instance 
-        // This will be out canonical models, not instances
-        // todo rename model to objects as per vmax
-        for (const auto& [vmaxContentName, vmaxModelList] : modelVmaxbMap) { 
-            VmaxModel currentVmaxModel(vmaxContentName);
-            const auto& jsonModelInfo = vmaxModelList.front(); // get the first model, others are instances at the scene level
-            std::vector<double> position = jsonModelInfo.position;
-            std::vector<double> rotation = jsonModelInfo.rotation;
-            std::vector<double> scale = jsonModelInfo.scale;
-            std::vector<double> extentCenter = jsonModelInfo.extentCenter;
-
-            // Get this models colors from the paletteN.png 
-            dl::String pngName = vmaxDirName + "/" + jsonModelInfo.paletteFile.c_str();
-            auto materialName = pngName.replace(".png", ".settings.vmaxpsb");
-            vmaxPalettes.push_back(read256x1PaletteFromPNG(pngName.buf())); // gather all models palettes
-            if (vmaxPalettes.empty()) { throw std::runtime_error("Failed to read palette from: png " ); }
-
-            // Read contentsN.vmaxb plist file, lzfse compressed
-            dl::String modelFileName = vmaxDirName + "/" + jsonModelInfo.dataFile.c_str();
-            plist_t plist_model_root = readPlist(modelFileName.buf(), true); // decompress=true
-
-            // There will one or more snapshots in the plist file
-            // Each snapshot is a capture of a 32x32x32 voxel chunk at a point in time
-            // A chunkId is a morton code that uniquely identifies the chunk is a 8x8x8 array within 256x256x256 model volume
-            // The highest index snapshot is the current state of the model
-            // One can traverse the snapshots in reverse to get the history of the model frok inception
-            plist_t plist_snapshots_array = plist_dict_get_item(plist_model_root, "snapshots");
-            uint32_t snapshots_array_size = plist_array_get_size(plist_snapshots_array);
-            #ifdef _DEBUG
-                std::cout << "vmaxContentName: " << vmaxContentName << std::endl;
-                std::cout << "snapshots_array_size: " << snapshots_array_size << std::endl;
-            #endif
-
-            // Create a VmaxModel object
-            for (uint32_t i = 0; i < snapshots_array_size; i++) {
-                plist_t plist_snapshot = plist_array_get_item(plist_snapshots_array, i);
-                plist_t plist_chunk = getNestedPlistNode(plist_snapshot, {"s", "id", "c"});
-                plist_t plist_datastream = getNestedPlistNode(plist_snapshot, {"s", "ds"});
-                uint64_t chunkID;
-                plist_get_uint_val(plist_chunk, &chunkID);
-                VmaxChunkInfo chunkInfo = vmaxChunkInfo(plist_snapshot);
-                #ifdef _DEBUG
-                    std::cout << "\nChunkID: " << chunkInfo.id << std::endl;
-                    std::cout << "TypeID: " << chunkInfo.type << std::endl;
-                    std::cout << "MortonCode: " << chunkInfo.mortoncode << "\n" <<std::endl;
-                #endif
-
-
-                std::vector<VmaxVoxel> xvoxels = vmaxVoxelInfo(plist_datastream, chunkInfo.id, chunkInfo.mortoncode);
-
-                for (const auto& voxel : xvoxels) {
-                    currentVmaxModel.addVoxel(voxel.x, voxel.y, voxel.z, voxel.material, voxel.palette ,chunkInfo.id, chunkInfo.mortoncode);
-                }
-            }
-            allModels.push_back(currentVmaxModel);
-
-            // Parse the materials store in paletteN.settings.vmaxpsb    
-            plist_t plist_material = readPlist(materialName.buf(),false); // decompress=false
-            std::array<VmaxMaterial, 8> currentMaterials = getVmaxMaterials(plist_material);
-            vmaxMaterials.push_back(currentMaterials);
-        }
-        // Need to access voxels by material and color groupings
-        // Models are canonical models, not instances
-        // Vmax objects are instances of models
-        // First create canonical models and they are NOT attached to belWorld
-        int modelIndex=0;
-        for (const auto& eachModel : allModels) {
-            dl::bella_sdk::Node belModel = addModelToScene(belScene, belWorld, eachModel, vmaxPalettes[modelIndex], vmaxMaterials[modelIndex]);
-            dl::String lllmodelName = dl::String(eachModel.vmaxbFileName.c_str());
-            dl::String lllcanonicalName = lllmodelName.replace(".vmaxb", "");
-            belCanonicalNodes[lllcanonicalName.buf()] = belModel;
-            std::cout << lllcanonicalName.buf() << std::endl;
-            modelIndex++;
-        }
-
-        // Second Loop through each vmax object and create an instance of the canonical model
-        // This is the instances of the models, we did a pass to create the canonical models earlier
-        for (const auto& [vmaxContentName, vmaxModelList] : modelVmaxbMap) { 
-            VmaxModel currentVmaxModel(vmaxContentName);
-            for(const auto& jsonModelInfo : vmaxModelList) {
-                std::vector<double> position = jsonModelInfo.position;
-                std::vector<double> rotation = jsonModelInfo.rotation;
-                std::vector<double> scale = jsonModelInfo.scale;
-                std::vector<double> extentCenter = jsonModelInfo.extentCenter;
-                auto jsonParentId = jsonModelInfo.parentId;
-                auto belParentId = dl::String(jsonParentId.c_str());
-                dl::String belParentGroupUUID = belParentId.replace("-", "_");
-                belParentGroupUUID = "_" + belParentGroupUUID;
-
-                auto belObjectId = dl::String(jsonModelInfo.id.c_str());
-                belObjectId = belObjectId.replace("-", "_");
-                belObjectId = "_" + belObjectId;
-
-                dl::String getCanonicalName = dl::String(jsonModelInfo.dataFile.c_str());
-                dl::String canonicalName = getCanonicalName.replace(".vmaxb", "");
-                //get bel node from canonical name
-                auto belCanonicalNode = belCanonicalNodes[canonicalName.buf()];
-                auto foofoo = belScene.findNode(canonicalName);
-
-
-                VmaxMatrix4x4 objectMat4 = combineVmaxTransforms(rotation[0], 
-                                                                 rotation[1], 
-                                                                 rotation[2], 
-                                                                 rotation[3],
-                                                                 position[0], 
-                                                                 position[1], 
-                                                                 position[2], 
-                                                                 scale[0], 
-                                                                 scale[1], 
-                                                                 scale[2]);
-
-                auto belNodeObjectInstance = belScene.createNode("xform", belObjectId, belObjectId);
-                belNodeObjectInstance["steps"][0]["xform"] = dl::Mat4({
-                    objectMat4.m[0][0], objectMat4.m[0][1], objectMat4.m[0][2], objectMat4.m[0][3],
-                    objectMat4.m[1][0], objectMat4.m[1][1], objectMat4.m[1][2], objectMat4.m[1][3],
-                    objectMat4.m[2][0], objectMat4.m[2][1], objectMat4.m[2][2], objectMat4.m[2][3],
-                    objectMat4.m[3][0], objectMat4.m[3][1], objectMat4.m[3][2], objectMat4.m[3][3]
-                    });
-
-                if (jsonParentId == "") {
-                    belNodeObjectInstance.parentTo(belScene.world());
-                } else {
-                    belNodeObjectInstance.parentTo(belGroupNodes[belParentGroupUUID]);
-                }
-                foofoo.parentTo(belNodeObjectInstance);
-            }
-        }
-
-        // Write Bella File .bsz=compressed .bsa=ascii .bsx=binary
+        dl::bella_sdk::Scene belScene = convertVmaxToBella(vmaxDirName);
         belScene.write(bszName.buf());
-    }
+     }
 
     if (args.have("--watchdir")) {
         std::cout << "VmaxTUI server started ..." << std::endl;
@@ -913,10 +698,10 @@ dl::bella_sdk::Node addModelToScene(dl::bella_sdk::Scene& belScene, dl::bella_sd
 }
 
 
-void convertVmaxToBella( const dl::String& vmaxDirName)
+dl::bella_sdk::Scene convertVmaxToBella( const dl::String& vmaxDirName)
 {
-    dl::String bszName;
-    bszName = vmaxDirName.replace(".vmax", ".bsz");
+    //dl::String bszName;
+    //bszName = vmaxDirName.replace(".vmax", ".bsz");
 
     // Create a new scene
     dl::bella_sdk::Scene belScene;
@@ -1129,7 +914,5 @@ void convertVmaxToBella( const dl::String& vmaxDirName)
             foofoo.parentTo(belNodeObjectInstance);
         }
     }
-
-    belScene.write(bszName.buf());
-    active_render = false;
+    return belScene;
 }

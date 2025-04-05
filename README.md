@@ -18,7 +18,7 @@ workdir/
 ├── libplist/
 ├── lzfse/
 ├── efsw/
-└── vox2bella/
+└── vmaxtui/
 ```
 
 # MacOS
@@ -48,9 +48,9 @@ cd efsw/build
 /Applications/CMake.app/Contents/bin/cmake ..
 make -j4
 cd ../..
-git clone https://github.com/oomer/vmax2bella.git
-cd vmax2bella
-make
+git clone https://github.com/oomer/vmaxtui.git
+cd vmaxtui
+make all -j4
 ```
 
 # Linux [NOT READY]
@@ -73,9 +73,9 @@ mkdir -p efsw/build
 cd efsw/build
 cmake ..
 make -j4
-git clone https://github.com/oomer/vmax2bella.git
-cd vmax2bella
-make
+git clone https://github.com/oomer/vmaxtui.git
+cd vmaxtui
+make all -j4
 ```
 
 # Windows [NOT READY]
@@ -86,7 +86,7 @@ make
 mkdir workdir
 git clone https://github.com/lzfse/lzfse
 
-git clone https://github.com/oomer/vmax2bella.git
-cd vmax2bella
-msbuild vox2bella.vcxproj /p:Configuration=release /p:Platform=x64 /p:PlatformToolset=v143
+git clone https://github.com/oomer/vmaxtui.git
+cd vmaxtui
+msbuild vmaxtui.vcxproj /p:Configuration=release /p:Platform=x64 /p:PlatformToolset=v143
 ```
